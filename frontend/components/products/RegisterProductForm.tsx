@@ -35,17 +35,44 @@ export function RegisterProductForm({ open, onOpenChange }: Props) {
   const toast = useToast();
   const [pending, setPending] = useState(false);
   const [imageUrl, setImageUrl] = useState<string | undefined>();
+  const [isOnline, setIsOnline] = useState(
+    typeof navigator !== 'undefined' ? navigator.onLine : true,
+  );
+
+  const { draft, saveDraft, clearDraft } = useOfflineDraft<FormValues>('register-product-draft');
+
+  useEffect(() => {
+    function onOnline() {
+      setIsOnline(true);
+    }
+    function onOffline() {
+      setIsOnline(false);
+    }
+    window.addEventListener('online', onOnline);
+    window.addEventListener('offline', onOffline);
+    return () => {
+      window.removeEventListener('online', onOnline);
+      window.removeEventListener('offline', onOffline);
+    };
+  }, []);
 
   const {
     register,
     handleSubmit,
     setValue,
     reset,
+    watch,
     formState: { errors },
   } = useForm<FormValues>({
     resolver: zodResolver(schema),
-    defaultValues: { id: generateId() },
+    defaultValues: draft ?? { id: generateId() },
   });
+
+  const formValues = watch();
+
+  useEffect(() => {
+    if (open) saveDraft(formValues);
+  }, [JSON.stringify(formValues), open]);
 
   async function onSubmit(values: FormValues) {
     if (!walletAddress) {
@@ -78,6 +105,7 @@ export function RegisterProductForm({ open, onOpenChange }: Props) {
 
       toast.dismiss(toastId);
       toast.success(`"${values.name}" registered successfully`, txHash);
+      clearDraft();
       reset({ id: generateId() });
       setImageUrl(undefined);
       onOpenChange(false);
@@ -103,6 +131,29 @@ export function RegisterProductForm({ open, onOpenChange }: Props) {
               <X size={18} aria-hidden />
             </Dialog.Close>
           </div>
+
+          {!isOnline && (
+            <div className="mb-4 flex items-center gap-2 px-3 py-2 rounded-lg bg-amber-500/10 border border-amber-500/20 text-amber-600 text-xs">
+              <WifiOff size={13} />
+              You are offline. Registration will be queued and synced when connectivity returns.
+            </div>
+          )}
+
+          {draft && (
+            <div className="mb-4 flex items-center justify-between px-3 py-2 rounded-lg bg-violet-500/10 border border-violet-500/20 text-violet-600 text-xs">
+              <span>Draft restored from a previous session.</span>
+              <button
+                type="button"
+                onClick={() => {
+                  clearDraft();
+                  reset({ id: generateId() });
+                }}
+                className="underline hover:no-underline ml-2"
+              >
+                Discard
+              </button>
+            </div>
+          )}
 
           <form onSubmit={handleSubmit(onSubmit)} className="flex flex-col gap-4">
             {/* Product ID */}

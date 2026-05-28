@@ -54,6 +54,25 @@ export function AddEventForm({ productId: initialProductId, onSuccess }: AddEven
   const eventType = watch('eventType');
 
   async function onSubmit(values: FormValues) {
+    setComplianceError(null);
+
+    let finalMetadata = values.metadata;
+    if (attachmentUrl) {
+      const parsed = JSON.parse(values.metadata || '{}');
+      parsed.attachmentUrl = attachmentUrl;
+      finalMetadata = JSON.stringify(parsed);
+    }
+
+    if (!isOnline) {
+      offlineQueue.enqueue({ type: 'add_event', payload: { ...values, metadata: finalMetadata } });
+      toast.success('Saved offline', 'Event queued and will sync when connectivity returns.');
+      clearDraft();
+      reset();
+      setAttachmentUrl(null);
+      onSuccess?.();
+      return;
+    }
+
     setPending(true);
     setSealed(null);
     const toastId = toast.loading('Adding tracking event…');
@@ -104,6 +123,20 @@ export function AddEventForm({ productId: initialProductId, onSuccess }: AddEven
 
   return (
     <form onSubmit={handleSubmit(onSubmit)} className="flex flex-col gap-4">
+      {!isOnline && (
+        <div className="flex items-center gap-2 px-3 py-2 rounded-lg bg-amber-500/10 border border-amber-500/20 text-amber-600 text-xs">
+          <WifiOff size={13} />
+          You are offline. The event will be queued and submitted when connectivity returns.
+        </div>
+      )}
+
+      {complianceError && (
+        <div className="flex items-start gap-2 px-3 py-2.5 rounded-lg bg-red-500/10 border border-red-500/20 text-red-600 text-xs">
+          <AlertTriangle size={14} className="mt-0.5 shrink-0" />
+          <span>{complianceError}</span>
+        </div>
+      )}
+
       {/* Product ID */}
       <div className="flex flex-col gap-1">
         <label className="text-sm font-medium">Product ID</label>
