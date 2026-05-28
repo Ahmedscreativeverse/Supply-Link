@@ -1,5 +1,5 @@
 #![no_std]
-use soroban_sdk::{contract, contractimpl, contracttype, contracterror, Address, Env, String, Vec, Symbol};
+use soroban_sdk::{contract, contractimpl, contracttype, contracterror, Address, Bytes, BytesN, Env, String, Vec, Symbol};
 
 /// Current event schema version.
 ///
@@ -228,6 +228,10 @@ pub enum DataKey {
     ProductIndex(u64),
     /// Key for actor nonce tracking. The inner `Address` is the actor address.
     ActorNonce(Address),
+    /// Key for the provenance root of a product's event history.
+    /// Stores a `BytesN<32>` SHA-256 chain hash, updated each time a tracking
+    /// event is finalized. Used by clients to verify event-list integrity.
+    ProvenanceRoot(String),
 }
 
 // ── Contract ─────────────────────────────────────────────────────────────────
@@ -478,6 +482,17 @@ impl SupplyLinkContract {
             env.storage()
                 .persistent()
                 .set(&DataKey::Events(product_id.clone()), &events);
+
+            // Update provenance root
+            let prev_root: BytesN<32> = env
+                .storage()
+                .persistent()
+                .get(&DataKey::ProvenanceRoot(product_id.clone()))
+                .unwrap_or_else(|| BytesN::from_array(&env, &[0u8; 32]));
+            let new_root = Self::compute_next_provenance_root(&env, &prev_root, &event);
+            env.storage()
+                .persistent()
+                .set(&DataKey::ProvenanceRoot(product_id.clone()), &new_root);
 
             // Emit event
             env.events().publish(
@@ -1082,6 +1097,17 @@ impl SupplyLinkContract {
                 .persistent()
                 .set(&DataKey::Events(product_id.clone()), &events);
 
+            // Update provenance root
+            let prev_root: BytesN<32> = env
+                .storage()
+                .persistent()
+                .get(&DataKey::ProvenanceRoot(product_id.clone()))
+                .unwrap_or_else(|| BytesN::from_array(&env, &[0u8; 32]));
+            let new_root = Self::compute_next_provenance_root(&env, &prev_root, &pending_event.event);
+            env.storage()
+                .persistent()
+                .set(&DataKey::ProvenanceRoot(product_id.clone()), &new_root);
+
             // Remove from pending
             pending.remove(event_index);
             if pending.len() > 0 {
@@ -1355,6 +1381,60 @@ impl SupplyLinkContract {
         pending.get(event_index).unwrap().pending_event_id
     }
 
+    /// Return the current provenance root for a product's event history.
+    ///
+    /// The provenance root is a SHA-256 hash chain over all finalized tracking
+    /// events for the product. It is updated atomically whenever a new event is
+    /// finalized (either directly or through multi-sig approval).
+    ///
+    /// Clients can verify the integrity of a locally-cached event list by
+    /// recomputing the chain hash from the events and comparing the result with
+    /// the value returned here. Any insertion, deletion, or modification of an
+    /// event will produce a different root and fail the comparison.
+    ///
+    /// # Returns
+    /// A `BytesN<32>` chain hash, or 32 zero bytes if no events have been
+    /// finalized yet.
+    ///
+    /// # Authorization
+    /// None — this is a read-only function.
+    pub fn get_provenance_root(env: Env, product_id: String) -> BytesN<32> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::ProvenanceRoot(product_id))
+            .unwrap_or_else(|| BytesN::from_array(&env, &[0u8; 32]))
+    }
+
+    /// Compute the next provenance root by chaining the previous root with the
+    /// content hash of a newly finalized event.
+    ///
+    /// Hash input layout (all big-endian):
+    /// ```text
+    /// prev_root (32)             SHA-256 hash of preceding state
+    /// sha256(event_type) (32)    content commitment: event type
+    /// sha256(location) (32)      content commitment: location
+    /// sha256(metadata) (32)      content commitment: metadata
+    /// sha256(product_id) (32)    content commitment: product identifier
+    /// timestamp (8)              u64 big-endian ledger timestamp
+    /// schema_version (4)         u32 big-endian schema version
+    /// ```
+    fn compute_next_provenance_root(env: &Env, prev_root: &BytesN<32>, event: &TrackingEvent) -> BytesN<32> {
+        let et_hash  = env.crypto().sha256(&event.event_type.to_bytes());
+        let loc_hash = env.crypto().sha256(&event.location.to_bytes());
+        let meta_hash = env.crypto().sha256(&event.metadata.to_bytes());
+        let pid_hash = env.crypto().sha256(&event.product_id.to_bytes());
+
+        let mut input = Bytes::from_slice(env, &prev_root.to_array());
+        input.append(&Bytes::from_slice(env, &et_hash.to_array()));
+        input.append(&Bytes::from_slice(env, &loc_hash.to_array()));
+        input.append(&Bytes::from_slice(env, &meta_hash.to_array()));
+        input.append(&Bytes::from_slice(env, &pid_hash.to_array()));
+        input.append(&Bytes::from_slice(env, &event.timestamp.to_be_bytes()));
+        input.append(&Bytes::from_slice(env, &event.schema_version.to_be_bytes()));
+
+        env.crypto().sha256(&input)
+    }
+
     fn validate_and_increment_nonce(env: &Env, actor: &Address, provided_nonce: u64) {
         let current_nonce: u64 = env
             .storage()
@@ -1507,5 +1587,173 @@ mod rejection_reason_tests {
         // Reject with max length reason (should work)
         let result = client.reject_event(&product_id, &0, &owner, &max_reason, &1);
         assert_eq!(result, true);
+    }
+}
+
+#[cfg(test)]
+mod provenance_tests {
+    use super::*;
+    use soroban_sdk::{testutils::Address as _, Address, Env, String};
+
+    fn setup_product(env: &Env, client: &SupplyLinkContractClient, product_id: &String, owner: &Address) {
+        client.register_product(
+            product_id,
+            &String::from_str(env, "Test Product"),
+            &String::from_str(env, "Test Origin"),
+            owner,
+            &1,
+        );
+    }
+
+    #[test]
+    fn test_provenance_root_is_zero_before_any_events() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, SupplyLinkContract);
+        let client = SupplyLinkContractClient::new(&env, &contract_id);
+
+        let owner = Address::generate(&env);
+        let product_id = String::from_str(&env, "prov-test-001");
+        setup_product(&env, &client, &product_id, &owner);
+
+        let root = client.get_provenance_root(&product_id);
+        let zero = BytesN::from_array(&env, &[0u8; 32]);
+        assert_eq!(root, zero, "root must be all-zero before any events");
+    }
+
+    #[test]
+    fn test_provenance_root_changes_after_event() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, SupplyLinkContract);
+        let client = SupplyLinkContractClient::new(&env, &contract_id);
+
+        let owner = Address::generate(&env);
+        let product_id = String::from_str(&env, "prov-test-002");
+        setup_product(&env, &client, &product_id, &owner);
+
+        let root_before = client.get_provenance_root(&product_id);
+
+        client.add_tracking_event(
+            &product_id,
+            &owner,
+            &String::from_str(&env, "Port of Hamburg"),
+            &String::from_str(&env, "SHIPPING"),
+            &String::from_str(&env, "{}"),
+        ).unwrap();
+
+        let root_after = client.get_provenance_root(&product_id);
+        let zero = BytesN::from_array(&env, &[0u8; 32]);
+        assert_eq!(root_before, zero);
+        assert_ne!(root_after, zero, "root must change after first event");
+    }
+
+    #[test]
+    fn test_provenance_root_changes_with_each_event() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, SupplyLinkContract);
+        let client = SupplyLinkContractClient::new(&env, &contract_id);
+
+        let owner = Address::generate(&env);
+        let product_id = String::from_str(&env, "prov-test-003");
+        setup_product(&env, &client, &product_id, &owner);
+
+        client.add_tracking_event(
+            &product_id, &owner,
+            &String::from_str(&env, "Farm A"),
+            &String::from_str(&env, "HARVEST"),
+            &String::from_str(&env, "{}"),
+        ).unwrap();
+        let root1 = client.get_provenance_root(&product_id);
+
+        client.add_tracking_event(
+            &product_id, &owner,
+            &String::from_str(&env, "Mill B"),
+            &String::from_str(&env, "PROCESSING"),
+            &String::from_str(&env, r#"{"temp":"22C"}"#),
+        ).unwrap();
+        let root2 = client.get_provenance_root(&product_id);
+
+        assert_ne!(root1, root2, "root must change with each new event");
+    }
+
+    #[test]
+    fn test_provenance_root_is_content_sensitive() {
+        // Two products with the same sequence of event types but different
+        // locations must produce different roots, proving content is included.
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, SupplyLinkContract);
+        let client = SupplyLinkContractClient::new(&env, &contract_id);
+
+        let owner = Address::generate(&env);
+
+        let id_a = String::from_str(&env, "prov-test-004a");
+        let id_b = String::from_str(&env, "prov-test-004b");
+        setup_product(&env, &client, &id_a, &owner);
+        setup_product(&env, &client, &id_b, &owner);
+
+        // Product A: location "Hamburg"
+        client.add_tracking_event(
+            &id_a, &owner,
+            &String::from_str(&env, "Hamburg"),
+            &String::from_str(&env, "SHIPPING"),
+            &String::from_str(&env, "{}"),
+        ).unwrap();
+
+        // Product B: location "Rotterdam" — same event type, different location
+        client.add_tracking_event(
+            &id_b, &owner,
+            &String::from_str(&env, "Rotterdam"),
+            &String::from_str(&env, "SHIPPING"),
+            &String::from_str(&env, "{}"),
+        ).unwrap();
+
+        let root_a = client.get_provenance_root(&id_a);
+        let root_b = client.get_provenance_root(&id_b);
+
+        assert_ne!(root_a, root_b, "different event content must yield different roots");
+    }
+
+    #[test]
+    fn test_provenance_root_multisig_finalization() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, SupplyLinkContract);
+        let client = SupplyLinkContractClient::new(&env, &contract_id);
+
+        let owner = Address::generate(&env);
+        let actor = Address::generate(&env);
+        let product_id = String::from_str(&env, "prov-test-005");
+
+        // Register product requiring 2 signatures
+        client.register_product(
+            &product_id,
+            &String::from_str(&env, "Multi-sig Product"),
+            &String::from_str(&env, "Origin"),
+            &owner,
+            &2,
+        );
+        client.add_authorized_actor(&product_id, &actor, &0);
+
+        let zero = BytesN::from_array(&env, &[0u8; 32]);
+        assert_eq!(client.get_provenance_root(&product_id), zero);
+
+        // Stage a pending event — root must NOT change yet
+        client.add_tracking_event(
+            &product_id, &actor,
+            &String::from_str(&env, "Warehouse X"),
+            &String::from_str(&env, "RETAIL"),
+            &String::from_str(&env, "{}"),
+        ).unwrap();
+        assert_eq!(client.get_provenance_root(&product_id), zero,
+            "pending event must not update provenance root");
+
+        // Owner approves — event finalizes, root must change
+        client.approve_event(&product_id, &0, &owner, &1).unwrap();
+        let root_after = client.get_provenance_root(&product_id);
+        assert_ne!(root_after, zero,
+            "provenance root must update on multi-sig finalization");
     }
 }
