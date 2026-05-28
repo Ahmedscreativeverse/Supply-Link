@@ -6,61 +6,68 @@
 # Usage:
 #   CONTRACT_ID=C... NETWORK=testnet SOURCE=deployer \
 #     ./migrate_state.sh
+# Reads the latest upgrade snapshot and re-registers all products + events
+# on the new contract. Idempotent: skips products that already exist.
+# Usage: NEW_CONTRACT=<addr> SOURCE=<alias> NETWORK=testnet bash migrate_state.sh
 set -euo pipefail
 
 NETWORK="${NETWORK:-testnet}"
 SOURCE="${SOURCE:?Set SOURCE to your Stellar account alias}"
-OLD_CONTRACT_ID="${CONTRACT_ID:?Set CONTRACT_ID to the current contract address}"
-WASM="target/wasm32-unknown-unknown/release/supply_link.wasm"
-SNAPSHOT_BASE="./snapshots"
-SNAPSHOT_DIR="$SNAPSHOT_BASE/$(date +%Y%m%d_%H%M%S)"
+NEW_CONTRACT="${NEW_CONTRACT:?Set NEW_CONTRACT to the new contract address}"
+OLD_CONTRACT="${OLD_CONTRACT:?Set OLD_CONTRACT to the old contract address}"
 
-echo "🚀 Supply-Link Contract Migration"
-echo "   Network:      $NETWORK"
-echo "   Old contract: $OLD_CONTRACT_ID"
-echo ""
+# Find the most recent snapshot
+SNAPSHOT=$(ls -t upgrade-snapshot-*.json 2>/dev/null | head -1)
+[[ -z "$SNAPSHOT" ]] && { echo "ERROR: No snapshot file found. Run pre_upgrade_snapshot.sh first."; exit 1; }
+echo "==> Using snapshot: $SNAPSHOT"
 
-# ── Step 1: Build ─────────────────────────────────────────────────────────────
-echo "Step 1/4: Building WASM..."
-cargo build --target wasm32-unknown-unknown --release
-echo "  ✅ Build complete"
+invoke_old() {
+  stellar contract invoke --id "$OLD_CONTRACT" --network "$NETWORK" --source "$SOURCE" -- "$@" 2>/dev/null
+}
+invoke_new() {
+  stellar contract invoke --id "$NEW_CONTRACT" --network "$NETWORK" --source "$SOURCE" -- "$@" 2>/dev/null
+}
 
-# ── Step 2: Pre-upgrade snapshot ─────────────────────────────────────────────
-echo "Step 2/4: Taking pre-upgrade snapshot..."
-CONTRACT_ID="$OLD_CONTRACT_ID" SNAPSHOT_DIR="$SNAPSHOT_DIR" \
-  NETWORK="$NETWORK" SOURCE="$SOURCE" \
-  "$(dirname "$0")/pre_upgrade_snapshot.sh"
+PRODUCT_IDS=$(jq -r '.product_ids[]' "$SNAPSHOT")
+ERRORS=0
 
-# ── Step 3: Deploy new contract ───────────────────────────────────────────────
-echo "Step 3/4: Deploying new contract..."
-NEW_CONTRACT_ID=$(stellar contract deploy \
-  --wasm "$WASM" \
-  --network "$NETWORK" \
-  --source "$SOURCE" \
-  --ignore-checks)
+while IFS= read -r pid; do
+  # Skip if already migrated
+  EXISTS=$(invoke_new product_exists --id "$pid")
+  if [[ "$EXISTS" == "true" ]]; then
+    echo "    SKIP (already exists): $pid"
+    continue
+  fi
 
-echo "  ✅ New contract deployed: $NEW_CONTRACT_ID"
-echo "$NEW_CONTRACT_ID" > "$SNAPSHOT_DIR/new_contract_id.txt"
+  # Fetch product details from old contract
+  PRODUCT=$(invoke_old get_product --id "$pid")
+  NAME=$(echo "$PRODUCT" | jq -r '.name')
+  ORIGIN=$(echo "$PRODUCT" | jq -r '.origin')
+  OWNER=$(echo "$PRODUCT" | jq -r '.owner')
 
-# ── Step 4: Post-upgrade smoke test ──────────────────────────────────────────
-echo "Step 4/4: Running post-upgrade smoke test..."
-if CONTRACT_ID="$NEW_CONTRACT_ID" SNAPSHOT_DIR="$SNAPSHOT_DIR" \
-   NETWORK="$NETWORK" SOURCE="$SOURCE" \
-   "$(dirname "$0")/post_upgrade_smoke_test.sh"; then
-  echo ""
-  echo "✅ Migration complete!"
-  echo "   New contract ID: $NEW_CONTRACT_ID"
-  echo "   Update NEXT_PUBLIC_CONTRACT_ID in your environment:"
-  echo "   export NEXT_PUBLIC_CONTRACT_ID=$NEW_CONTRACT_ID"
-else
-  echo ""
-  echo "❌ Migration validation FAILED"
-  echo ""
-  echo "── Rollback instructions ──────────────────────────────────────────────"
-  echo "  The old contract is still live at: $OLD_CONTRACT_ID"
-  echo "  No state was migrated — the old contract is unchanged."
-  echo "  Ensure NEXT_PUBLIC_CONTRACT_ID remains: $OLD_CONTRACT_ID"
-  echo "  Snapshot saved at: $SNAPSHOT_DIR"
-  echo "───────────────────────────────────────────────────────────────────────"
+  echo "    Migrating product: $pid"
+  invoke_new register_product \
+    --id "$pid" \
+    --name "$NAME" \
+    --origin "$ORIGIN" \
+    --owner "$OWNER" || { echo "ERROR: Failed to register $pid"; ERRORS=$((ERRORS+1)); continue; }
+
+  # Replay events
+  EVENTS=$(invoke_old get_tracking_events --product_id "$pid")
+  EVENT_COUNT=$(echo "$EVENTS" | jq 'length')
+  for i in $(seq 0 $((EVENT_COUNT - 1))); do
+    EV=$(echo "$EVENTS" | jq ".[$i]")
+    invoke_new add_tracking_event \
+      --product_id "$pid" \
+      --caller "$(echo "$EV" | jq -r '.actor')" \
+      --location "$(echo "$EV" | jq -r '.location')" \
+      --event_type "$(echo "$EV" | jq -r '.event_type')" \
+      --metadata "$(echo "$EV" | jq -r '.metadata')" || { echo "ERROR: Failed to replay event $i for $pid"; ERRORS=$((ERRORS+1)); }
+  done
+done <<< "$PRODUCT_IDS"
+
+if [[ "$ERRORS" -gt 0 ]]; then
+  echo "==> Migration completed with $ERRORS error(s). Review output above."
   exit 1
 fi
+echo "==> Migration completed successfully."

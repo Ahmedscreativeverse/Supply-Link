@@ -3,6 +3,9 @@
 import { useState, useMemo } from "react";
 import type { TrackingEvent, EventType, EventFilter } from "@/lib/types";
 import { ChevronDown, ChevronUp, ChevronLeft, ChevronRight, X } from "lucide-react";
+import { useState } from "react";
+import type { TrackingEvent } from "@/lib/types";
+import { ChevronDown, ChevronUp, Paperclip } from "lucide-react";
 import { EVENT_TYPE_CONFIG } from "@/lib/eventTypeConfig";
 import { applyFilter, extractActors, extractEventTypes } from "@/lib/stellar/contract";
 
@@ -22,6 +25,10 @@ function MetadataViewer({ raw }: { raw: string }) {
   }
   if (!parsed || Object.keys(parsed).length === 0) return null;
 
+  const { attachmentUrl, ...rest } = parsed as Record<string, unknown>;
+  const attachmentHref = typeof attachmentUrl === "string" ? attachmentUrl : null;
+  const hasOtherKeys = Object.keys(rest).length > 0;
+
   return (
     <div className="mt-2">
       <button
@@ -37,6 +44,34 @@ function MetadataViewer({ raw }: { raw: string }) {
         <pre className="mt-1 text-xs bg-[var(--muted-bg)] text-[var(--muted)] rounded-md px-3 py-2 overflow-x-auto">
           {JSON.stringify(parsed, null, 2)}
         </pre>
+    <div className="mt-2 flex flex-col gap-1">
+      {attachmentHref && (
+        <a
+          href={attachmentHref}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="inline-flex items-center gap-1.5 text-xs text-violet-500 hover:underline"
+        >
+          <Paperclip size={12} />
+          View attachment
+        </a>
+      )}
+
+      {hasOtherKeys && (
+        <>
+          <button
+            onClick={() => setOpen((v: boolean) => !v)}
+            className="flex items-center gap-1 text-xs text-[var(--muted)] hover:text-[var(--foreground)] transition-colors w-fit"
+          >
+            {open ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
+            {open ? "Hide" : "Show"} metadata
+          </button>
+          {open && (
+            <pre className="text-xs bg-[var(--muted-bg)] text-[var(--muted)] rounded-md px-3 py-2 overflow-x-auto">
+              {JSON.stringify(rest, null, 2)}
+            </pre>
+          )}
+        </>
       )}
     </div>
   );
