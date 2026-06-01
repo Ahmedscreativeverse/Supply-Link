@@ -127,7 +127,19 @@ export default async function VerifyPage({ params }: Props) {
             {t('owner')}: {product.owner}
           </p>
         </div>
-        <ProductQRCode productId={product.id} size={140} />
+        <ProductQRCode
+          productId={product.id}
+          size={140}
+          proof={
+            {
+              id: product.id,
+              name: product.name,
+              origin: product.origin,
+              owner: product.owner,
+              ts: product.timestamp,
+            } satisfies QrProofPayload
+          }
+        />
       </div>
 
       {product.hazardous && (
