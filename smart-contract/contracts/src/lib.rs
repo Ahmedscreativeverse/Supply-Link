@@ -324,6 +324,23 @@ pub struct Batch {
     pub timestamp: u64,
 }
 
+/// An approval hop in the chain-of-custody for a product. (#499)
+/// Records each actor's approval as the product moves through the supply chain.
+#[contracttype]
+#[derive(Clone)]
+pub struct ApprovalHop {
+    /// ID of the product being approved.
+    pub product_id: String,
+    /// Address of the actor approving the product.
+    pub approver: Address,
+    /// Type of approval (e.g., "RECEIVED", "INSPECTED", "SHIPPED").
+    pub approval_type: String,
+    /// Timestamp when the approval was recorded.
+    pub timestamp: u64,
+    /// Optional JSON metadata about the approval.
+    pub metadata: String,
+}
+
 // ── Storage keys ─────────────────────────────────────────────────────────────
 
 #[contracttype]
@@ -352,6 +369,8 @@ pub enum DataKey {
     ActorNonce(Address),
     /// Key for the compliance policy of a product. The inner `String` is the product ID.
     CompliancePolicy(String),
+    /// Key for approval hops in the chain-of-custody. The inner `String` is the product ID. (#499)
+    ApprovalHops(String),
 }
 
 // ── Contract ─────────────────────────────────────────────────────────────────
@@ -1170,6 +1189,118 @@ o            actor: caller,
             escrow.clone(),
         );
         escrow
+    }
+
+    // ── #499: Multi-hop approval chain-of-custody ────────────────────────────
+
+    /// Record an approval hop in the chain-of-custody for a product.
+    /// Each actor in the supply chain signs to approve the product's current state.
+    ///
+    /// # Parameters
+    /// - `env` — Soroban execution environment.
+    /// - `product_id` — ID of the product being approved.
+    /// - `approver` — Address of the actor approving the product.
+    /// - `approval_type` — Type of approval (e.g., "RECEIVED", "INSPECTED", "SHIPPED").
+    /// - `metadata` — Optional JSON metadata about the approval.
+    ///
+    /// # Returns
+    /// The approval hop record with timestamp and approver info.
+    ///
+    /// # Authorization
+    /// Requires `approver.require_auth()`.
+    ///
+    /// # Panics
+    /// - `"product not found"` — if `product_id` is not registered.
+    pub fn record_approval_hop(
+        env: Env,
+        product_id: String,
+        approver: Address,
+        approval_type: String,
+        metadata: String,
+    ) -> ApprovalHop {
+        let product: Product = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Product(product_id.clone()))
+            .expect("product not found");
+
+        approver.require_auth();
+
+        let hop = ApprovalHop {
+            product_id: product_id.clone(),
+            approver: approver.clone(),
+            approval_type: approval_type.clone(),
+            timestamp: env.ledger().timestamp(),
+            metadata,
+        };
+
+        let mut hops: Vec<ApprovalHop> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::ApprovalHops(product_id.clone()))
+            .unwrap_or_else(|| Vec::new(&env));
+
+        hops.push_back(hop.clone());
+        env.storage()
+            .persistent()
+            .set(&DataKey::ApprovalHops(product_id.clone()), &hops);
+
+        env.events().publish(
+            (Symbol::new(&env, "approval_hop_recorded"), product_id),
+            hop.clone(),
+        );
+
+        hop
+    }
+
+    /// Retrieve all approval hops for a product's chain-of-custody.
+    ///
+    /// # Parameters
+    /// - `env` — Soroban execution environment.
+    /// - `product_id` — ID of the product.
+    ///
+    /// # Returns
+    /// Vector of all approval hops in chronological order.
+    pub fn get_approval_hops(env: Env, product_id: String) -> Vec<ApprovalHop> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::ApprovalHops(product_id))
+            .unwrap_or_else(|| Vec::new(&env))
+    }
+
+    /// Verify the chain-of-custody for a product by checking approval hops.
+    ///
+    /// # Parameters
+    /// - `env` — Soroban execution environment.
+    /// - `product_id` — ID of the product.
+    /// - `required_approvers` — Vector of addresses that must have approved.
+    ///
+    /// # Returns
+    /// `true` if all required approvers have recorded an approval hop, `false` otherwise.
+    pub fn verify_chain_of_custody(
+        env: Env,
+        product_id: String,
+        required_approvers: Vec<Address>,
+    ) -> bool {
+        let hops: Vec<ApprovalHop> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::ApprovalHops(product_id))
+            .unwrap_or_else(|| Vec::new(&env));
+
+        for required in required_approvers.iter() {
+            let mut found = false;
+            for hop in hops.iter() {
+                if hop.approver == required {
+                    found = true;
+                    break;
+                }
+            }
+            if !found {
+                return false;
+            }
+        }
+        true
     }
 }
 
