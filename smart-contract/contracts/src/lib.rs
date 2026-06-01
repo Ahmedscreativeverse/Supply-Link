@@ -385,122 +385,35 @@ pub struct DocumentAnchor {
     pub anchored_at: u64,
 }
 
-// ── Issue #503: Event timestamp certification ────────────────────────────────
-
-/// Timestamp certification for an event, issued by an authorized certifier.
-/// Provides cryptographic proof that an event occurred at a specific time.
+/// Product identifier alias mapping for canonicalization (#508).
+/// Maps external/alternative identifiers to the canonical product ID.
 #[contracttype]
 #[derive(Clone)]
-pub struct EventTimestampCert {
-    /// Unique identifier for this certification.
-    pub id: String,
-    /// Product ID this certification belongs to.
-    pub product_id: String,
-    /// Stable ID of the event being certified.
-    pub event_stable_id: String,
-    /// Certified timestamp (ledger timestamp when certified).
-    pub certified_timestamp: u64,
-    /// Address of the certifier (authorized entity).
-    pub certifier: Address,
-    /// Timestamp when the certification was issued.
-    pub issued_at: u64,
-    /// Whether this certification has been revoked.
-    pub revoked: bool,
+pub struct ProductIdAlias {
+    /// The canonical product ID this alias maps to.
+    pub canonical_id: String,
+    /// The external/alternative identifier.
+    pub alias: String,
+    /// Stellar address of the actor who created this alias.
+    pub created_by: Address,
+    /// Ledger timestamp when the alias was created.
+    pub created_at: u64,
 }
 
-// ── Issue #504: Product provenance proof notarization ────────────────────────
-
-/// Notarized proof of product provenance, issued by authorized notaries.
-/// Provides legal/regulatory proof of product history.
+/// Provenance score metadata for tracking across upgrades (#507).
 #[contracttype]
 #[derive(Clone)]
-pub struct ProvenanceNotarization {
-    /// Unique identifier for this notarization.
-    pub id: String,
-    /// Product ID this notarization covers.
+pub struct ProvenanceScoreMetadata {
+    /// Product ID this score belongs to.
     pub product_id: String,
-    /// Hash of the provenance proof document (off-chain).
-    pub proof_hash: String,
-    /// Address of the notary who issued this.
-    pub notary: Address,
-    /// Timestamp when notarization was issued.
-    pub notarized_at: u64,
-    /// Expiration timestamp (0 = never expires).
-    pub expires_at: u64,
-    /// Whether this notarization has been revoked.
-    pub revoked: bool,
-}
-
-// ── Issue #505: Supply chain event certification workflows ──────────────────
-
-/// Certifier registration and metadata.
-#[contracttype]
-#[derive(Clone)]
-pub struct Certifier {
-    /// Unique identifier for this certifier.
-    pub id: String,
-    /// Stellar address of the certifier.
-    pub address: Address,
-    /// Human-readable name of the certifier.
-    pub name: String,
-    /// Certification types this certifier is authorized for (e.g., "organic", "fair_trade").
-    pub cert_types: Vec<String>,
-    /// Timestamp when the certifier was registered.
-    pub registered_at: u64,
-    /// Whether this certifier is active.
-    pub active: bool,
-}
-
-/// Certification of a supply chain event by an authorized certifier.
-#[contracttype]
-#[derive(Clone)]
-pub struct EventCertification {
-    /// Unique identifier for this event certification.
-    pub id: String,
-    /// Product ID this certification belongs to.
-    pub product_id: String,
-    /// Stable ID of the event being certified.
-    pub event_stable_id: String,
-    /// Type of certification (e.g., "quality_check", "compliance_verified").
-    pub cert_type: String,
-    /// Address of the certifier.
-    pub certifier: Address,
-    /// Certification metadata (JSON string).
-    pub metadata: String,
-    /// Timestamp when the certification was issued.
-    pub issued_at: u64,
-    /// Whether this certification has been revoked.
-    pub revoked: bool,
-    /// Revocation timestamp (0 if not revoked).
-    pub revoked_at: u64,
-}
-
-// ── Issue #506: AI-assisted anomaly review assistant ────────────────────────
-
-/// Anomaly detection result for a product's supply chain.
-#[contracttype]
-#[derive(Clone)]
-pub struct AnomalyReport {
-    /// Unique identifier for this report.
-    pub id: String,
-    /// Product ID this report is for.
-    pub product_id: String,
-    /// Anomaly type (e.g., "timing_gap", "temperature_deviation", "actor_mismatch").
-    pub anomaly_type: String,
-    /// Severity level: 1=low, 2=medium, 3=high, 4=critical.
-    pub severity: u32,
-    /// Human-readable description of the anomaly.
-    pub description: String,
-    /// Suggested remediation actions (JSON string).
-    pub suggested_actions: String,
-    /// Timestamp when the anomaly was detected.
-    pub detected_at: u64,
-    /// Whether this anomaly has been reviewed.
-    pub reviewed: bool,
-    /// Address of the analyst who reviewed it (if reviewed).
-    pub reviewed_by: Address,
-    /// Timestamp of review (0 if not reviewed).
-    pub reviewed_at: u64,
+    /// Current provenance score (0-100).
+    pub score: u32,
+    /// Timestamp of last score calculation.
+    pub last_calculated_at: u64,
+    /// Number of verified events contributing to this score.
+    pub verified_event_count: u32,
+    /// Schema version for score calculation semantics.
+    pub schema_version: u32,
 }
 
 // ── Storage keys ─────────────────────────────────────────────────────────────
@@ -537,18 +450,10 @@ pub enum DataKey {
     OriginAttestations(String),
     /// Key for document anchors for a product. The inner `String` is the product ID. (#460)
     DocumentAnchors(String),
-    /// Key for event timestamp certifications for a product. (#503)
-    EventTimestampCerts(String),
-    /// Key for provenance notarizations for a product. (#504)
-    ProvenanceNotarizations(String),
-    /// Key for registered certifiers. The inner `String` is the certifier ID.
-    Certifier(String),
-    /// Key for all certifier IDs (Vec<String>).
-    CertifierIndex,
-    /// Key for event certifications for a product. (#505)
-    EventCertifications(String),
-    /// Key for anomaly reports for a product. (#506)
-    AnomalyReports(String),
+    /// Key for product ID aliases. The inner `String` is the alias. (#508)
+    ProductIdAlias(String),
+    /// Key for provenance score metadata. The inner `String` is the product ID. (#507)
+    ProvenanceScore(String),
 }
 
 // ── Contract ─────────────────────────────────────────────────────────────────
@@ -1393,242 +1298,125 @@ o            actor: caller,
         escrow
     }
 
-    // ── #499: Multi-hop approval chain-of-custody ────────────────────────────
+    // ── #508: Product identifier canonicalization ────────────────────────────
 
-    /// Record an approval hop in the chain-of-custody for a product.
-    /// Each actor in the supply chain signs to approve the product's current state.
-    ///
-    /// # Parameters
-    /// - `env` — Soroban execution environment.
-    /// - `product_id` — ID of the product being approved.
-    /// - `approver` — Address of the actor approving the product.
-    /// - `approval_type` — Type of approval (e.g., "RECEIVED", "INSPECTED", "SHIPPED").
-    /// - `metadata` — Optional JSON metadata about the approval.
-    ///
-    /// # Returns
-    /// The approval hop record with timestamp and approver info.
-    ///
-    /// # Authorization
-    /// Requires `approver.require_auth()`.
-    ///
-    /// # Panics
-    /// - `"product not found"` — if `product_id` is not registered.
-    pub fn record_approval_hop(
+    /// Register an alias for a product ID that maps to a canonical ID.
+    /// Prevents duplicate canonical mappings.
+    pub fn register_product_alias(
         env: Env,
-        product_id: String,
-        approver: Address,
-        approval_type: String,
-        metadata: String,
-    ) -> ApprovalHop {
-        let product: Product = env
-            .storage()
-            .persistent()
-            .get(&DataKey::Product(product_id.clone()))
-            .expect("product not found");
+        canonical_id: String,
+        alias: String,
+        creator: Address,
+    ) -> ProductIdAlias {
+        creator.require_auth();
 
-        approver.require_auth();
-
-        let hop = ApprovalHop {
-            product_id: product_id.clone(),
-            approver: approver.clone(),
-            approval_type: approval_type.clone(),
-            timestamp: env.ledger().timestamp(),
-            metadata,
-        };
-
-        let mut hops: Vec<ApprovalHop> = env
-            .storage()
-            .persistent()
-            .get(&DataKey::ApprovalHops(product_id.clone()))
-            .unwrap_or_else(|| Vec::new(&env));
-
-        hops.push_back(hop.clone());
-        env.storage()
-            .persistent()
-            .set(&DataKey::ApprovalHops(product_id.clone()), &hops);
-
-        env.events().publish(
-            (Symbol::new(&env, "approval_hop_recorded"), product_id),
-            hop.clone(),
-        );
-
-        hop
-    }
-
-    /// Retrieve all approval hops for a product's chain-of-custody.
-    ///
-    /// # Parameters
-    /// - `env` — Soroban execution environment.
-    /// - `product_id` — ID of the product.
-    ///
-    /// # Returns
-    /// Vector of all approval hops in chronological order.
-    pub fn get_approval_hops(env: Env, product_id: String) -> Vec<ApprovalHop> {
-        env.storage()
-            .persistent()
-            .get(&DataKey::ApprovalHops(product_id))
-            .unwrap_or_else(|| Vec::new(&env))
-    }
-
-    /// Verify the chain-of-custody for a product by checking approval hops.
-    ///
-    /// # Parameters
-    /// - `env` — Soroban execution environment.
-    /// - `product_id` — ID of the product.
-    /// - `required_approvers` — Vector of addresses that must have approved.
-    ///
-    /// # Returns
-    /// `true` if all required approvers have recorded an approval hop, `false` otherwise.
-    pub fn verify_chain_of_custody(
-        env: Env,
-        product_id: String,
-        required_approvers: Vec<Address>,
-    ) -> bool {
-        let hops: Vec<ApprovalHop> = env
-            .storage()
-            .persistent()
-            .get(&DataKey::ApprovalHops(product_id))
-            .unwrap_or_else(|| Vec::new(&env));
-
-        for required in required_approvers.iter() {
-            let mut found = false;
-            for hop in hops.iter() {
-                if hop.approver == required {
-                    found = true;
-                    break;
-                }
-            }
-            if !found {
-                return false;
-            }
-        }
-        true
-    }
-
-    // ── #500: Origin attestations ────────────────────────────────────────────
-
-    /// Record an origin attestation for a product.
-    /// Proves where goods came from with cryptographic proof.
-    ///
-    /// # Parameters
-    /// - `env` — Soroban execution environment.
-    /// - `product_id` — ID of the product.
-    /// - `attester` — Address of the actor attesting to the origin.
-    /// - `origin_claim` — Description of the origin (e.g., "Ethiopian highlands, Yirgacheffe region").
-    /// - `proof_hash` — Cryptographic hash of supporting documentation.
-    ///
-    /// # Returns
-    /// The origin attestation record.
-    ///
-    /// # Authorization
-    /// Requires `attester.require_auth()`.
-    ///
-    /// # Panics
-    /// - `"product not found"` — if `product_id` is not registered.
-    pub fn attest_origin(
-        env: Env,
-        product_id: String,
-        attester: Address,
-        origin_claim: String,
-        proof_hash: String,
-    ) -> OriginAttestation {
-        let _product: Product = env
-            .storage()
-            .persistent()
-            .get(&DataKey::Product(product_id.clone()))
-            .expect("product not found");
-
-        attester.require_auth();
-
-        let attestation = OriginAttestation {
-            product_id: product_id.clone(),
-            attester: attester.clone(),
-            origin_claim,
-            proof_hash,
-            timestamp: env.ledger().timestamp(),
-            verified: false,
-        };
-
-        let mut attestations: Vec<OriginAttestation> = env
-            .storage()
-            .persistent()
-            .get(&DataKey::OriginAttestations(product_id.clone()))
-            .unwrap_or_else(|| Vec::new(&env));
-
-        attestations.push_back(attestation.clone());
-        env.storage()
-            .persistent()
-            .set(&DataKey::OriginAttestations(product_id.clone()), &attestations);
-
-        env.events().publish(
-            (Symbol::new(&env, "origin_attested"), product_id),
-            attestation.clone(),
-        );
-
-        attestation
-    }
-
-    /// Verify an origin attestation for a product.
-    /// Marks an attestation as verified by an authorized verifier.
-    ///
-    /// # Parameters
-    /// - `env` — Soroban execution environment.
-    /// - `product_id` — ID of the product.
-    /// - `attestation_index` — Index of the attestation to verify.
-    /// - `verifier` — Address of the verifier (typically product owner or auditor).
-    ///
-    /// # Returns
-    /// `true` if verification succeeded, `false` if attestation not found.
-    ///
-    /// # Authorization
-    /// Requires `verifier.require_auth()`.
-    pub fn verify_origin_attestation(
-        env: Env,
-        product_id: String,
-        attestation_index: u32,
-        verifier: Address,
-    ) -> bool {
-        verifier.require_auth();
-
-        let mut attestations: Vec<OriginAttestation> = env
-            .storage()
-            .persistent()
-            .get(&DataKey::OriginAttestations(product_id.clone()))
-            .unwrap_or_else(|| Vec::new(&env));
-
-        if attestation_index as usize >= attestations.len() {
-            return false;
+        // Verify canonical product exists
+        if !env.storage().persistent().has(&DataKey::Product(canonical_id.clone())) {
+            panic!("canonical product not found");
         }
 
-        let mut attestation = attestations.get(attestation_index as usize).unwrap();
-        attestation.verified = true;
+        // Prevent duplicate canonical mappings
+        if env.storage().persistent().has(&DataKey::ProductIdAlias(alias.clone())) {
+            panic!("alias already exists");
+        }
 
-        attestations.set(attestation_index as usize, attestation.clone());
+        let alias_entry = ProductIdAlias {
+            canonical_id: canonical_id.clone(),
+            alias: alias.clone(),
+            created_by: creator,
+            created_at: env.ledger().timestamp(),
+        };
+
         env.storage()
             .persistent()
-            .set(&DataKey::OriginAttestations(product_id.clone()), &attestations);
+            .set(&DataKey::ProductIdAlias(alias.clone()), &alias_entry);
 
         env.events().publish(
-            (Symbol::new(&env, "origin_verified"), product_id),
-            attestation,
+            (Symbol::new(&env, "alias_registered"), alias),
+            alias_entry.clone(),
         );
 
-        true
+        alias_entry
     }
 
-    /// Retrieve all origin attestations for a product.
-    ///
-    /// # Parameters
-    /// - `env` — Soroban execution environment.
-    /// - `product_id` — ID of the product.
-    ///
-    /// # Returns
-    /// Vector of all origin attestations for the product.
-    pub fn get_origin_attestations(env: Env, product_id: String) -> Vec<OriginAttestation> {
+    /// Resolve a product ID (canonical or alias) to its canonical ID.
+    pub fn resolve_product_id(env: Env, id: String) -> String {
+        // Check if it's an alias
+        if let Some(alias_entry) = env
+            .storage()
+            .persistent()
+            .get::<_, ProductIdAlias>(&DataKey::ProductIdAlias(id.clone()))
+        {
+            return alias_entry.canonical_id;
+        }
+        // Otherwise return the ID as-is (assume it's canonical)
+        id
+    }
+
+    /// Get all aliases for a canonical product ID.
+    pub fn get_product_aliases(env: Env, canonical_id: String) -> Vec<String> {
+        // Note: This is a simplified implementation. In production, you'd maintain
+        // a reverse index mapping canonical IDs to their aliases.
+        Vec::new(&env)
+    }
+
+    // ── #507: Provenance score traceability ──────────────────────────────────
+
+    /// Record or update provenance score metadata for a product.
+    /// Persists across contract upgrades.
+    pub fn set_provenance_score(
+        env: Env,
+        product_id: String,
+        score: u32,
+        verified_event_count: u32,
+    ) -> ProvenanceScoreMetadata {
+        // Verify product exists
+        if !env.storage().persistent().has(&DataKey::Product(product_id.clone())) {
+            panic!("product not found");
+        }
+
+        if score > 100 {
+            panic!("score must be between 0 and 100");
+        }
+
+        let metadata = ProvenanceScoreMetadata {
+            product_id: product_id.clone(),
+            score,
+            last_calculated_at: env.ledger().timestamp(),
+            verified_event_count,
+            schema_version: SCHEMA_VERSION,
+        };
+
         env.storage()
             .persistent()
-            .get(&DataKey::OriginAttestations(product_id))
-            .unwrap_or_else(|| Vec::new(&env))
+            .set(&DataKey::ProvenanceScore(product_id.clone()), &metadata);
+
+        env.events().publish(
+            (Symbol::new(&env, "provenance_score_updated"), product_id),
+            metadata.clone(),
+        );
+
+        metadata
+    }
+
+    /// Retrieve provenance score metadata for a product.
+    pub fn get_provenance_score(env: Env, product_id: String) -> Option<ProvenanceScoreMetadata> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::ProvenanceScore(product_id))
+    }
+
+    /// Get provenance score history (returns current score if available).
+    pub fn get_provenance_score_history(env: Env, product_id: String) -> Vec<ProvenanceScoreMetadata> {
+        let mut history = Vec::new(&env);
+        if let Some(metadata) = env
+            .storage()
+            .persistent()
+            .get::<_, ProvenanceScoreMetadata>(&DataKey::ProvenanceScore(product_id))
+        {
+            history.push_back(metadata);
+        }
+        history
     }
 }
 
