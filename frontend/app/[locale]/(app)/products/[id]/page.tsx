@@ -32,6 +32,7 @@ export default function ProductDetailPage({ params }: Props) {
   if (!product) notFound();
   const p = product!;
   const events = getEventsByProductId(p.id);
+  const allProducts = getAllProducts();
   const registeredAt = new Date(p.timestamp).toLocaleString();
 
   // Auditor attestations
@@ -177,6 +178,27 @@ export default function ProductDetailPage({ params }: Props) {
       <section className="border border-[var(--card-border)] bg-[var(--card)] rounded-xl p-6 mb-6">
         <h2 className="text-base font-semibold mb-4 text-[var(--foreground)]">Certifications</h2>
         <CertificationsPanel certifications={p.certifications ?? []} productId={p.id} />
+      </section>
+
+      {/* Assembly Structure */}
+      <section className="border border-[var(--card-border)] bg-[var(--card)] rounded-xl p-6 mb-6">
+        <AssemblyPanel
+          productId={p.id}
+          assembly={p.assembly}
+          allProducts={allProducts}
+          isOwner={false}
+        />
+      </section>
+
+      {/* Warranty */}
+      <section className="border border-[var(--card-border)] bg-[var(--card)] rounded-xl p-6 mb-6">
+        <WarrantyPanel
+          productId={p.id}
+          productTimestamp={p.timestamp}
+          warranty={p.warranty}
+          warrantyClaims={p.warrantyClaims}
+          isOwner={false}
+        />
       </section>
 
       {/* Event Map */}
